@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>Magma - slow soothing effects</title>
+
+	<link rel="manifest" href="manifest.json">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Magma PWA">
+	<link rel="apple-touch-icon" href="images/apple-touch-icon-iphone-60x60.png">
+<link rel="apple-touch-icon" sizes="60x60" href="images/apple-touch-icon-ipad-76x76.png">
+<link rel="apple-touch-icon" sizes="114x114" href="images/apple-touch-icon-iphone-retina-120x120.png">
+<link rel="apple-touch-icon" sizes="144x144" href="images/apple-touch-icon-ipad-retina-152x152.png">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+
+	<link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon">
+	<link rel="icon" href="images/favicon.ico" type="image/x-icon">
+
+	<link href="css/index.css" rel="stylesheet" />
+	<script type="text/javascript" src="glMatrix-0.9.5.min.js"></script>
+	<script type="text/javascript" src="webgl-utils.js"></script>
+	<script type="text/javascript" src="main.js"></script>
+	<script src="gamepads.js"></script>
+
+	<script id="shader-1-fs" type="f">
+		precision highp float;
+    varying vec2 vTextureCoord;
+    uniform sampler2D uSampler;
+    uniform vec2 resolution;
+    uniform vec2 mouse;
+    uniform int index;
+    uniform float time;
+    uniform float Param1;
+    uniform float Param2;
+    uniform float Param3;
+	uniform float Param4;
+
+#extension GL_OES_standard_derivatives : enable
+#define PI 3.141592
+
+vec3 hueShift( vec3 color, float hueAdjust ){
+
+    const vec3  kRGBToYPrime = vec3 (0.299, 0.587, 0.114);
+    const vec3  kRGBToI      = vec3 (0.596, -0.275, -0.321);
+    const vec3  kRGBToQ      = vec3 (0.212, -0.523, 0.311);
+
+    const vec3  kYIQToR     = vec3 (1.0, 0.956, 0.621);
+    const vec3  kYIQToG     = vec3 (1.0, -0.272, -0.647);
+    const vec3  kYIQToB     = vec3 (1.0, -1.107, 1.704);
+
+    float   YPrime  = dot (color, kRGBToYPrime);
+    float   I       = dot (color, kRGBToI);
+    float   Q       = dot (color, kRGBToQ);
+    float   hue     = atan (Q, I);
+    float   chroma  = sqrt (I * I + Q * Q);
+
+    hue += hueAdjust;
+
+    Q = chroma * sin (hue);
+    I = chroma * cos (hue);
+
+    vec3    yIQ   = vec3 (YPrime, I, Q);
+
+    return vec3( dot (yIQ, kYIQToR), dot (yIQ, kYIQToG), dot (yIQ, kYIQToB) );
+
+}
+
+const float brightness = 0.15;
+const float contrast = 1.2;
+const float saturation = 1.5;
+mat4 brightnessMatrix( float brightness )
+{
+    return mat4( 1, 0, 0, 0, 0, 1, 0, 0,0, 0, 1, 0,brightness, brightness, brightness, 1 );
+}
+
+mat4 contrastMatrix( float contrast )
+{
+	float t = ( 1.0 - contrast ) / 2.0;
+	return mat4( contrast, 0, 0, 0, 0, contrast, 0, 0, 0, 0, contrast, 0,t, t, t, 1 );
+}
+
+mat4 saturationMatrix( float saturation )
+{
+    vec3 luminance = vec3( 0.3086, 0.6094, 0.0820 );
+    float oneMinusSat = 1.0 - saturation;
+    vec3 red = vec3( luminance.x * oneMinusSat );
+    red+= vec3( saturation, 0, 0 );
+    vec3 green = vec3( luminance.y * oneMinusSat );
+    green += vec3( 0, saturation, 0 );
+    vec3 blue = vec3( luminance.z * oneMinusSat );
+    blue += vec3( 0, 0, saturation );
+    return mat4( red, 0, green, 0, blue, 0, 0, 0, 0, 1 );
+}
+
+float rand(vec2 co){
+    return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+}
+
+float q(float a, vec2 b, vec2 c, vec2 xy) {
+	vec2 qq = - (xy - b) * (xy - b)/((6.0-Param2) * c * c);
+	return a * exp(qq.x + qq.y);
+}
+
+vec3 colormap(float q) {
+    return 
+        vec3(0.2, 0.8, .0)
+        + vec3(0.2, 0.7, 0.5) * smoothstep(vec3(0.4, 0.69, 0.7), vec3(0.69, 1.6, 5.5), vec3(q))
+        + vec3(0.6, -0.6, -0.9) * smoothstep(0.69, 0.7, q);
+}
+
+float blob(float a, vec2 center, float size, vec2 xy, vec2 range, vec2 speed) {
+    vec2 b = center + range * cos( rand(center) + time / speed);
+    size *=1.5;
+    vec2 c = mix(
+        vec2(2.0 * size, 0.0),
+        vec2(0.0, 2.0 * size),
+        0.5 - 0.08 * sin(2.0 * time/(speed.y))
+    );
+	return q(a, b, c, xy);
+}
+
+void main()
+{
+    float smallest = min(resolution.x, resolution.y);
+    vec2 r = (resolution.xy - smallest) / 2.0;
+    vec2 uv = (gl_FragCoord.xy - r) / smallest - 0.5;
+    float fq = 0.0;
+    int breakOut = 25;
+    if (Param3 == 2.)
+	    breakOut = 18;
+	else if (Param3 == 3.)
+	    breakOut = 14;
+	else if (Param3 == 4.)
+	    breakOut = 10;
+    for (int i = 0; i < 25; i += 1) {
+        fq += blob(
+            mix(0.9, 1.0 ,rand(vec2(i, 1))), // a
+            vec2(mix(-0.5, 0.5, rand(vec2(i, 2))),0.0), // centre
+            mix(0.03, 0.07, rand(vec2(i, 3))), // size
+	    uv,
+            vec2(mix(0.0, 0.8, rand(vec2(i, 4))),0.5), // rnnge
+            vec2(mix(10.0, 22.0, rand(vec2(i, 5))),mix(-5.0, -7.0, rand(vec2(i, 6))))*1.5 // speed
+        );
+	    if (i > breakOut)
+		    break;
+    }
+    vec4 col = vec4(colormap(fq),1.);
+	if (col.g <.35 && Param4 == 2.) { // extra edge
+		col.g *= 1.5;
+		col.r/=1.5;
+		col.b = .2;
+		col = brightnessMatrix( brightness ) * contrastMatrix( contrast ) * saturationMatrix( saturation ) * col;
+	}
+   if (col.g > .7 && col.r < .5)
+	   col/= 10.;
+	else {
+		if (Param1 == 2.) {
+			col.x = 1.0-col.y;
+			col.xyz = hueShift(col.xyz, 2.);
+		}
+		else if (Param1 == 3.) {
+			col.xyz = hueShift(col.xyz, 1.);
+		}
+		else if (Param1 == 4.) {
+			col.xyz = col.zxy;
+			col.y = 1.-col.z;
+			col.xyz = hueShift(col.xyz, 2.2);
+			col.xyz *= 1.4;
+		}
+		else if (Param1 == 5.) {
+			col.z = 1.0-col.z;
+			//col.xyz = hueShift(col.xyz, 2.);
+		}
+		else if (Param1 == 6.) {
+			col.z = 1.0-col.z;
+			col.xyz = hueShift(col.xyz, .6);
+		}
+		else if (Param1 == 7.) {
+			col.z = 1.0-col.z;
+			col.xyz = hueShift(col.xyz, 1.1).yxx;
+			col.xyz *= 1.3;
+		}
+		else if (Param1 == 8.) {
+			col.xyz = vec3(col.x+col.y+col.z);
+		}
+	}
+    gl_FragColor = col;
+}
+
+</script>
+
+	<script id="shader-vs" type="v">
+		attribute vec3 aVertexPosition;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uMVMatrix;
+    uniform mat4 uPMatrix;
+
+    varying vec2 vTextureCoord;
+
+    void main(void) {
+        gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+        vTextureCoord = aTextureCoord;
+    }
+</script>
+
+</head>
+
+<body>
+	<div id="container">
+		<div id="main">
+			<canvas id="webgl-canvas" style="border: none;" width="500" height="500"></canvas>
+			<splash class="btn" enabled></splash>
+			<button class="btn" enabled></button>
+			<button1 class="btn" enabled></button1>
+			<button2 class="btn" enabled></button2>
+			<button3 class="btn" enabled></button3>
+			<audio id="audio" autobuffer="autobuffer" preload="auto">
+				<source src="plazma.mp3" type="audio/mp3" />
+				<source src="plazma.ogg" type="audio/ogg" />
+				<source src="plazma.aac" type="audio/aac" />
+				This browser does not support the AUDIO element.
+			</audio>
+			<audio id="audio1" autobuffer="autobuffer" preload="auto">
+				<source src="plazma1.mp3" type="audio/mp3" />
+				<source src="plazma1.ogg" type="audio/ogg" />
+				<source src="plazma1.aac" type="audio/aac" />
+				This browser does not support the AUDIO element.
+			</audio>
+			<audio id="audio2" autobuffer="autobuffer" preload="auto">
+				<source src="plazma2.mp3" type="audio/mp3" />
+				<source src="plazma2.ogg" type="audio/ogg" />
+				<source src="plazma2.aac" type="audio/aac" />
+				This browser does not support the AUDIO element.
+			</audio>
+		</div>
+	</div>
+</body>
+
+</html>
